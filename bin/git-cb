@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  printf 'git-cb: not inside a git repository\n' >&2
+  exit 1
+fi
+
+if ! command -v fzf >/dev/null 2>&1; then
+  printf 'git-cb: fzf is required for branch selection and previews\n' >&2
+  exit 1
+fi
+
+format_ref() {
+  local ref="$1"
+  local name="$2"
+  local date="$3"
+
+  case "$ref" in
+    refs/heads/*)
+      printf 'local\t%s\t%s\t%s\n' "$name" "$date" "$name"
+      ;;
+    refs/remotes/*)
+      case "$name" in
+        */HEAD) return 0 ;;
+      esac
+      printf 'remote\t%s\t%s\t%s\n' "$name" "$date" "$name"
+      ;;
+  esac
+}
+
+branches=$(
+  git for-each-ref \
+    --sort=-committerdate \
+    --format='%(refname)%09%(refname:short)%09%(committerdate:relative)' \
+    refs/heads refs/remotes |
+    while IFS=$'\t' read -r ref name date; do
+      format_ref "$ref" "$name" "$date"
+    done
+)
+
+if [[ -z "$branches" ]]; then
+  printf 'git-cb: no branches found\n' >&2
+  exit 1
+fi
+
+selection=$(
+  printf '%s\n' "$branches" |
+    fzf \
+      --ansi \
+      --height=80% \
+      --layout=reverse \
+      --border \
+      --prompt='checkout branch> ' \
+      --delimiter=$'\t' \
+      --with-nth='2,1,3' \
+      --preview-window='right:60%:wrap' \
+      --preview='git log --graph --decorate --date=relative --pretty=format:"%C(auto)%h%Creset %Cgreen%cr%Creset %C(bold blue)%an%Creset %s %C(auto)%d%Creset" --max-count=30 {4} 2>/dev/null'
+)
+
+branch=$(printf '%s' "$selection" | cut -f4)
+kind=$(printf '%s' "$selection" | cut -f1)
+
+if [[ -z "$branch" ]]; then
+  exit 0
+fi
+
+switch_args=(switch)
+
+if [[ -n $(git status --porcelain) ]]; then
+  printf 'Working tree changes detected. Force checkout? This can discard tracked changes. [y/N] ' >&2
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES)
+      switch_args+=(--force)
+      ;;
+    *)
+      printf 'git-cb: checkout cancelled\n' >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ "$kind" == "remote" ]]; then
+  local_name=${branch#*/}
+  if git show-ref --verify --quiet "refs/heads/$local_name"; then
+    git "${switch_args[@]}" "$local_name"
+  else
+    git "${switch_args[@]}" --track "$branch"
+  fi
+else
+  git "${switch_args[@]}" "$branch"
+fi
